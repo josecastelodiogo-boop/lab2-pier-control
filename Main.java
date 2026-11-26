@@ -1,111 +1,179 @@
 package org.sky.service;
 
 import org.sky.service.billing.Billing;
-import org.sky.service.exception.*;
-import org.sky.service.model.*;
-import org.sky.service.service.NotificationService;
+import org.sky.service.exception.DuplicateSubscriptionException;
+import org.sky.service.exception.InsufficientFundsException;
+import org.sky.service.exception.InvalidPromoCodeException;
+import org.sky.service.exception.InvalidSubscriptionException;
+import org.sky.service.exception.PromoCodeExpiredException;
+import org.sky.service.exception.SubscriptionNotFoundException;
+import org.sky.service.model.Boat;
+import org.sky.service.model.CorporateBoatRental;
+import org.sky.service.model.IndividualBoatRental;
+import org.sky.service.model.Option;
+import org.sky.service.model.PromoCode;
 import org.sky.service.service.impl.EmailNotification;
+import org.sky.service.util.UserDataGenerator;
 
 import java.time.LocalDate;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
 
 public class Main {
+
+    private static final int USERS_COUNT = 50;
+    private static final double VIP_THRESHOLD = 5000.0;
+
     public static void main(String[] args) {
-        // Inicialização do serviço de notificação e do faturamento (Billing)
-        NotificationService notificationService = new EmailNotification();
-        Billing billing = new Billing(notificationService);
+        Billing billing = new Billing(new EmailNotification());
+        UserDataGenerator generator = new UserDataGenerator(2026L);
 
-        System.out.println("=== Запуск демонстрации системы SkyService ===");
+        generateUsers(billing, generator);
+        streamAnalytics(billing);
+        exceptionScenarios(billing, generator);
 
-        // ---------- Cenário 1: Cadastro e pagamento com sucesso ----------
-        System.out.println("\n--- Сценарий 1: Успешная оплата ---");
+        System.out.println("\nПрограмма завершена без ошибок.");
+    }
+
+    // ======================================================================
+    // ЭТАП 3: все клиенты генерируются Datafaker'ом (ручных объектов нет)
+    // ======================================================================
+    private static void generateUsers(Billing billing, UserDataGenerator generator) {
+        title("Datafaker: генерация " + USERS_COUNT + " клиентов");
+        int created = generator.populate(billing, USERS_COUNT);
+        System.out.println("Сгенерировано и добавлено в HashMap: " + created
+                + " (размер базы: " + billing.size() + ")");
+
+        System.out.println("Первые 5 записей:");
+        billing.getEmails().stream()
+                .limit(5)
+                .forEach(email -> System.out.println("  " + email));
+    }
+
+    // ======================================================================
+    // ЭТАП 4: аналитика только через Stream API
+    // ======================================================================
+    private static void streamAnalytics(Billing billing) {
+        title("Аналитика Stream API");
+
+        System.out.println("Общая выручка (mapToDouble + sum): "
+                + money(billing.calculateTotalRevenue()) + " руб.");
+
+        System.out.println("\nКорпоративных аренд (filter + count): "
+                + billing.countByRentalType(CorporateBoatRental.class));
+        System.out.println("Индивидуальных аренд (filter + count): "
+                + billing.countByRentalType(IndividualBoatRental.class));
+
+        System.out.println("\nГруппировка по типу аренды (Collectors.groupingBy):");
+        billing.groupCountByRentalType().forEach((type, cnt) ->
+                System.out.println("  " + type + ": " + cnt + " клиентов"));
+
+        System.out.println("\nВыручка по типу аренды:");
+        billing.revenueByRentalType().forEach((type, sum) ->
+                System.out.println("  " + type + ": " + money(sum) + " руб."));
+
+        List<Boat> vip = billing.findVipClients(VIP_THRESHOLD);
+        System.out.println("\nVIP-клиенты (чек > " + money(VIP_THRESHOLD) + "): найдено "
+                + vip.size() + ". Топ-5:");
+        vip.stream()
+                .sorted(Comparator.comparingDouble(Boat::calculateBillingPrice).reversed())
+                .limit(5)
+                .forEach(b -> System.out.println("  " + b.getOwnerName()
+                        + " [" + b.getClass().getSimpleName() + "] — " + money(b.calculateBillingPrice()) + " руб."));
+    }
+
+    // ======================================================================
+    // Сценарии исключений ЛР3 ч1 — работают на сгенерированных клиентах.
+    // Вручную создаются только заведомо НЕКОРРЕКТНЫЕ данные (они и должны падать).
+    // ======================================================================
+    private static void exceptionScenarios(Billing billing, UserDataGenerator generator) {
+        title("Сценарии исключений (ЛР3 ч1)");
+        List<String> emails = billing.getEmails();
+
+        // Сценарий 1: успешная оплата двух сгенерированных клиентов (@Slf4j + уведомление)
+        System.out.println("--- Сценарий 1: оплата существующих клиентов ---");
         try {
-            // Criação de uma conta individual
-            Boat b1 = new IndividualBoatRental("Иван Иванов", 500.0, 3000.0);
-            b1.addOption(new Option("Спасательный жилет", 100.0));
-            b1.addOption(new Option("Страховка", 150.0));
-            b1.addPromo(new PromoCode("SUMMER10", 10.0, LocalDate.now().plusDays(30)));
-
-            // Criação de uma conta corporativa
-            Boat b2 = new CorporateBoatRental("ООО Вектор", 5000.0, 10000.0, 0.15);
-            b2.addOption(new Option("Гид", 2000.0));
-            b2.addPromo(new PromoCode("CORP20", 20.0, LocalDate.now().plusDays(60)));
-
-            // Registro no banco de dados (HashMap)
-            billing.registerSubscription("ivan@mail.ru", b1);
-            billing.registerSubscription("corp@vector.com", b2);
-
-            // Processamento do pagamento (sucesso)
-            billing.processPaymentByEmail("ivan@mail.ru");
-            billing.processPaymentByEmail("corp@vector.com");
-
-        } catch (DuplicateSubscriptionException | SubscriptionNotFoundException | InsufficientFundsException e) {
-            System.out.println("Ошибка при оплате: " + e.getMessage());
+            billing.processPaymentByEmail(emails.get(0));
+            billing.processPaymentByEmail(emails.get(1));
+        } catch (SubscriptionNotFoundException | InsufficientFundsException | PromoCodeExpiredException e) {
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         } finally {
-            System.out.println("[Блок finally] Сценарий 1 успешно завершен.");
+            System.out.println("[finally] Сценарий 1 завершён\n");
         }
 
-        // ---------- Cenário 2: Exceção verificada (Email não cadastrado) ----------
-        System.out.println("\n--- Сценарий 2: Попытка оплаты несуществующего Email ---");
+        // Сценарий 2: SubscriptionNotFoundException (проверяемое)
+        System.out.println("--- Сценарий 2: несуществующий email ---");
         try {
             billing.processPaymentByEmail("fake@mail.com");
-        } catch (SubscriptionNotFoundException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО checked]: " + e.getMessage());
-        } catch (InsufficientFundsException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО checked]: " + e.getMessage());
+        } catch (SubscriptionNotFoundException | InsufficientFundsException | PromoCodeExpiredException e) {
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         } finally {
-            System.out.println("[Блок finally] Программа продолжает работу без сбоев.");
+            System.out.println("[finally] Программа продолжает работу\n");
         }
 
-        // ---------- Cenário 3: Exceção não verificada (Preço negativo) ----------
-        System.out.println("\n--- Сценарий 3: Создание подписки с отрицательной стоимостью ---");
+        // Сценарий 3: InvalidSubscriptionException (непроверяемое)
+        System.out.println("--- Сценарий 3: отрицательная стоимость ---");
         try {
-            new IndividualBoatRental("Петр Петров", -100.0, 1000.0);
+            IndividualBoatRental.builder()
+                    .ownerName("Пётр").basePrice(-100.0).balance(500.0)
+                    .build();
         } catch (InvalidSubscriptionException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО unchecked]: " + e.getMessage());
-        } finally {
-            System.out.println("[Блок finally] Программа не завершилась аварийно.");
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+        System.out.println();
 
-        // ---------- Cenário 4: Exceção verificada (Email duplicado) ----------
-        System.out.println("\n--- Сценарий 4: Попытка регистрации дубликата Email ---");
+        // Сценарий 4: дубликат — пытаемся зарегистрировать уже существующий email
+        System.out.println("--- Сценарий 4: повторная регистрация ---");
         try {
-            Boat duplicate = new IndividualBoatRental("Иван Петров", 300.0, 1000.0);
-            billing.registerSubscription("ivan@mail.ru", duplicate);
+            billing.registerSubscription(emails.get(0), generator.randomValidBoat());
         } catch (DuplicateSubscriptionException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО checked]: " + e.getMessage());
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+        System.out.println();
 
-        // ---------- Cenário 5: Exceção não verificada (Código promocional inválido) ----------
-        System.out.println("\n--- Сценарий 5: Создание некорректного промокода ---");
+        // Сценарий 5: некорректный промокод
+        System.out.println("--- Сценарий 5: некорректный промокод ---");
         try {
             new PromoCode("bad code!", 110, LocalDate.now().plusDays(1));
         } catch (InvalidPromoCodeException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО unchecked]: " + e.getMessage());
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+        System.out.println();
 
-        // ---------- Cenário 6: Exceção verificada (Código promocional expirado) ----------
-        System.out.println("\n--- Сценарий 6: Применение истекшего промокода ---");
+        // Сценарий 6: просроченный промокод обнаруживается при оплате
+        System.out.println("--- Сценарий 6: просроченный промокод ---");
         try {
-            PromoCode expired = new PromoCode("OLD2020", 50.0, LocalDate.now().minusDays(1));
-            if (expired.isExpired()) {
-                throw new PromoCodeExpiredException("Промокод " + expired.getCode() + " истек " + expired.getExpirationDate());
-            }
-        } catch (PromoCodeExpiredException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО checked]: " + e.getMessage());
+            Boat withOldPromo = generator.randomValidBoat();
+            withOldPromo.addPromo(new PromoCode("OLD2020", 10, LocalDate.now().minusDays(1)));
+            billing.registerSubscription("old@mail.ru", withOldPromo);
+            billing.processPaymentByEmail("old@mail.ru");
+        } catch (DuplicateSubscriptionException | SubscriptionNotFoundException
+                 | InsufficientFundsException | PromoCodeExpiredException e) {
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+        System.out.println();
 
-        // ---------- Cenário 7: Exceção verificada (Saldo insuficiente) ----------
-        System.out.println("\n--- Сценарий 7: Недостаточно средств на балансе ---");
+        // Сценарий 7: недостаточно средств — сгенерированной аренде добавляем очень дорогую опцию
+        System.out.println("--- Сценарий 7: недостаточно средств ---");
         try {
-            Boat poor = new IndividualBoatRental("Бедный Клиент", 1000.0, 100.0);
-            billing.registerSubscription("poor@mail.com", poor);
-            billing.processPaymentByEmail("poor@mail.com");
-        } catch (DuplicateSubscriptionException | SubscriptionNotFoundException e) {
-            System.out.println("Системная ошибка: " + e.getMessage());
-        } catch (InsufficientFundsException e) {
-            System.out.println("[ПЕРЕХВАЧЕНО checked]: " + e.getMessage());
+            Boat expensive = generator.randomValidBoat();
+            expensive.addOption(new Option("Эксклюзивный тур", 1_000_000.0));
+            billing.registerSubscription("poor@mail.ru", expensive);
+            billing.processPaymentByEmail("poor@mail.ru");
+        } catch (DuplicateSubscriptionException | SubscriptionNotFoundException
+                 | InsufficientFundsException | PromoCodeExpiredException e) {
+            System.out.println("Перехвачено " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
+    }
 
-        System.out.println("\n=== Демонстрация завершена! Система работает стабильно. ===");
+    private static void title(String text) {
+        System.out.println("\n==================================================");
+        System.out.println(text);
+        System.out.println("==================================================");
+    }
+
+    private static String money(double value) {
+        return String.format(Locale.US, "%.2f", value);
     }
 }
